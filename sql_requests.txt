@@ -1,0 +1,206 @@
+1.1.Для каждого автора найти количество просмотров его статей
+
+SELECT sum(a.views) AS all_views, aa.author_id FROM articles a INNER JOIN author_article aa
+ON a.article_id = aa.article_id
+GROUP BY aa.author_id
+ORDER BY all_views DESC
+LIMIT 100
+
+С именем автора:
+SELECT sum(a.views) AS all_views, aa.author_id, u.name FROM ((articles a INNER JOIN author_article aa
+ON a.article_id = aa.article_id) INNER JOIN authors au ON aa.author_id = au.author_id)
+INNER JOIN users u ON au.user_id = u.user_id
+GROUP BY aa.author_id, u.name
+ORDER BY all_views DESC
+LIMIT 100
+
+1.2.Найти автора с самым большим количеством статей
+
+SELECT count(aa.article_id), aa.author_id, u.name FROM (author_article aa INNER JOIN authors au ON aa.author_id = au.author_id)
+INNER JOIN users u ON au.user_id = u.user_id
+GROUP BY aa.author_id, u.name
+ORDER BY count(aa.article_id) DESC
+LIMIT 100
+
+1.3 Вывести пользователей, написавших больше n комментариев за последние сутки (и забанить за спам)
+
+?
+SELECT c.user_id, u.name, count(c.comm_id) AS comm_count FROM comments c INNER JOIN users u ON c.user_id = u.user_id
+GROUP BY c.user_id, u.name
+HAVING count(c.comm_id) > 170
+ORDER BY count(c.comm_id) DESC
+
+SELECT * FROM
+(SELECT c.user_id, u.name, count(c.comm_id) AS comm_count FROM comments c INNER JOIN users u ON c.user_id = u.user_id
+GROUP BY c.user_id, u.name)
+WHERE comm_count > 170
+ORDER BY comm_count DESC
+
+1.4.В каком регионе больше всего авторов
+
+SELECT u.country, count(u.user_id) AS au_count FROM users u INNER JOIN authors a ON u.user_id = a.user_id
+GROUP BY u.country
+ORDER BY au_count DESC
+
+2.1.Вывести всех пользователей за какой-либо период, у которых x% комментариев, написанных ими,
+имеют рейтинг меньше y.
+
+SELECT
+    c.user_id,
+	u.name,
+    (SUM(CASE WHEN c.rating > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*)) AS positive_comment_percentage
+FROM comments c INNER JOIN users u ON c.user_id = u.user_id
+WHERE c.date > '01.01.2020'
+GROUP BY c.user_id, u.name
+ORDER BY c.user_id DESC
+LIMIT 100
+
+2.2 Для каждого тега вывести топ авторов по максимальному рейтингу статьи за какой-то период.
+SELECT author_id, section_id, max_rating, rankk FROM
+(SELECT
+    aa.author_id AS author_id,
+	sa.section_id AS section_id,
+	max(a.rating) AS max_rating,
+	ROW_NUMBER() OVER (PARTITION BY sa.section_id ORDER BY MAX(a.rating) DESC) AS rankk
+FROM (articles a INNER JOIN author_article aa ON a.article_id =aa.article_id)
+INNER JOIN article_section sa ON sa.article_id = a.article_id
+GROUP BY aa.author_id, sa.section_id
+ORDER BY sa.section_id, max(a.rating) DESC)
+WHERE rankk <= 5
+
+2.3.Вывести авторов, чаще всего отвечающих на комментарии под своими статьями
+SELECT
+aa.author_id,
+COUNT(*) AS comment_count
+FROM
+(comments c INNER JOIN author_article aa ON c.article_id = aa.article_id)
+INNER JOIN authors a ON a.author_id = aa.author_id
+WHERE a.user_id = c.user_id
+GROUP BY aa.author_id
+ORDER BY comment_count DESC
+LIMIT 1000
+
+2.4 Для каждого тега сравнить средний рейтинг статей этого тега, со средним рейтингом по всем статьям
+SELECT
+sa.section_id,
+AVG(a.rating) AS avg_section_rating,
+(SELECT AVG(rating) AS a FROM articles) AS avg_rating
+FROM
+article_section sa INNER JOIN articles a ON sa.article_id = a.article_id
+GROUP BY sa.section_id
+LIMIT 1000
+
+3.1.Получить медианный рейтинг самой популярной статьи по авторам
+
+with max_rating_t AS (
+	SELECT
+		aa.author_id AS author_id,
+		max(a.rating) AS max_rating,
+		ROW_NUMBER() over(order by max(a.rating) asc) as rank
+	FROM articles a INNER JOIN author_article aa ON a.article_id = aa.article_id
+	GROUP BY aa.author_id),
+median AS (
+	SELECT
+		ROUND(SUM(mr.rank) / COUNT(*)) AS med
+	FROM max_rating_t mr)
+
+SELECT
+	mt.max_rating
+FROM max_rating_t mt CROSS JOIN median
+WHERE mt.rank = median.med
+
+3.2 Для тега, осмотреть динамику прироста общего числа просмотров по годам/дням/месяцам
+WITH all_dates AS (
+    SELECT generate_series('1970-01-01'::date, '2024-12-31'::date, '1 day'::interval) AS date
+),
+exist_dates AS (
+	SELECT
+		SUM(a.views) AS views,
+		a.date AS date
+	FROM
+	articles a INNER JOIN article_section sa ON a.article_id = sa.article_id
+	WHERE sa.section_id = 1
+	GROUP BY a.date
+),
+day_views AS (
+	SELECT
+		ad.date AS date,
+        COALESCE(ed.views, 0) AS views
+	FROM
+	all_dates ad LEFT JOIN exist_dates ed ON ad.date = ed.date
+)
+
+SELECT
+	year,
+	total_views,
+	ROUND(((total_views - LAG(total_views, 1) OVER (ORDER BY year)) / (total_views + 1) * 100), 2)
+FROM(
+	SELECT
+	    DATE_PART('year', date) AS year,
+	    SUM(views) AS total_views
+	FROM day_views
+	GROUP BY DATE_PART('year', date)
+	)
+
+3.3.Найти самые популярные статьи для каждого тега.
+Где популярная статья - это статья которая входит в тройку лучших уникальных рейтингов
+
+WITH top_views AS (
+SELECT
+	a.article_id AS article_id,
+	sa.section_id AS section_id,
+ 	dense_rank() over(partition by sa.section_id order by a.views desc) as rank
+FROM
+	articles a INNER JOIN article_section sa ON a.article_id = sa.article_id
+)
+SELECT top_views.article_id, top_views.section_id, top_views.rank FROM top_views
+WHERE top_views.rank <= 3
+LIMIT 1000
+
+3.4 Построить иерархию комментариев. Комментарий, ответы к нему, ответы к ответам и тд.
+INSERT INTO comments VALUES (1272897 ,100, 1272893, '01.01.2024', 'qwerty', 1, 1);
+INSERT INTO comments VALUES (1272898 ,100, 1272897, '01.01.2024', 'qwerty', 1, 1);
+
+WITH RECURSIVE comments_graph AS (
+        SELECT
+		c.comm_id,
+		0 AS depth,
+		CAST(comm_id AS VARCHAR(255)) AS path
+        FROM comments c
+		WHERE parent_id IS NULL
+      UNION
+        SELECT
+		c.comm_id,
+		cg.depth + 1,
+		CAST(cg.path || '.' || c.comm_id AS VARCHAR(255)) AS path
+        FROM comments c, comments_graph cg
+        WHERE cg.comm_id = c.parent_id
+)
+SELECT * FROM comments_graph
+ORDER BY depth DESC
+LIMIT 1000
+
+
+          3.4. Для тега, осмотреть динамику прироста общего числа просмотров по дням
+SELECT
+	section_id,
+	article_id,
+	article_views,
+	date,
+	current_views,
+	LAG(current_views, 1) OVER (PARTITION BY section_id ORDER BY date)
+FROM
+(SELECT
+	sa.section_id AS section_id,
+	a.article_id AS article_id,
+	a.views AS article_views,
+	a.date AS date,
+	SUM(a.views) OVER (PARTITION BY sa.section_id ORDER BY date) AS current_views
+FROM
+articles a INNER JOIN article_section sa ON a.article_id = sa.article_id
+WHERE sa.section_id = 1)
+
+
+
+
+
